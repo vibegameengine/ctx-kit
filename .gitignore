@@ -1,0 +1,7 @@
+# ctx-kit installs these into the repos it configures; they must never be
+# committed here either, in case someone runs ./install.sh inside a clone.
+.claude/settings.local.json
+.code-graph/
+
+.DS_Store
+node_modules/

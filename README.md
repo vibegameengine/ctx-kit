@@ -86,9 +86,42 @@ misleadingly, because your interactive profile has already loaded nvm.
   hooks before re-adding, so re-running never stacks duplicates.
 - **`.gitignore` matters.** `settings.local.json` holds absolute machine paths and
   `.code-graph/` is a multi-megabyte local DB. Both get added.
-- **The embedding model is lazy.** It downloads in the background on the first real vector
-  query, not at install. Until it lands, `semantic_code_search` is FTS5/BM25 only.
-  `install.sh` nudges the download; `verify.sh` reports the state as a warning, not a failure.
+- **The embedding model never downloads itself.** See below — this one is worth its own
+  section.
+
+## Vector search does not work out of the box
+
+`semantic_code_search` sounds like it does semantic matching. Until the embedding model is
+installed it is plain FTS5/BM25 keyword search — and it still returns plausible-looking
+results, so the degradation is easy to miss. `code-graph-mcp doctor` is the tell:
+
+```
+Embeddings  ⚠️  vector INACTIVE — 5198 embeddable nodes, 0 embedded
+                (model not loaded and NO download has ever been attempted on this machine)
+```
+
+The weights are supposed to download "lazily on first use". In practice that can never
+fire at all, and no amount of querying triggers it. `./install-model.sh` installs them
+deterministically — ~80 MB, checksum-verified, from the GitHub release matching your
+binary version.
+
+Three traps it routes around, each of which silently produces "installed but still not
+working":
+
+1. **Hand-filling the default cache dir does not work.** `<cache>/code-graph/models` is
+   only trusted once the binary's own `extract_and_promote` has written a `.model-id`
+   marker; a manually populated copy is treated as not-current and ignored. The supported
+   route is a *separate* directory pointed at by `CODE_GRAPH_MODEL_DIR`.
+2. **The published `.sha256` is a bare hash with no filename**, so `shasum -c` fails with
+   `no properly formatted SHA checksum lines found`. It has to be compared by hand.
+3. **Loading the model is not using it.** The server logs `Embedding model loaded
+   successfully` while coverage sits at 0% — embeddings are only generated during an index
+   pass, so the script runs one. It is resumable: re-run to finish.
+
+`CODE_GRAPH_MODEL_DIR` is written to `~/.claude/settings.json` (machine-wide, since the
+model is machine-wide and the MCP server inherits its environment from Claude Code).
+**Restart Claude Code afterwards** — until then the CLI has the model but the running
+server does not.
 
 ## After installing
 
@@ -110,6 +143,10 @@ Then `./verify.sh` should report the hooks firing.
              --no-index           # skip the initial graph build
              -y                   # no prompts
 
+./install-model.sh --project-dir DIR   # embedding model for real vector search (~80 MB)
+                   --model-dir DIR     # where to put the weights
+                   --no-embed          # install weights but skip the indexing pass
+
 ./verify.sh  --no-probe           # skip the write/index/delete round trip
 
 ./uninstall.sh --global           # also unwire compressmcp + plugins
@@ -120,6 +157,7 @@ Then `./verify.sh` should report the hooks firing.
 
 ```
 install.sh          orchestrates, idempotent, self-verifying
+install-model.sh    embedding model for vector search; separate because it is ~80 MB
 verify.sh           evidence-based checks; exits non-zero on failure
 uninstall.sh        rollback; never deletes without an explicit flag
 lib/common.sh       CLI resolution, bare-env runner, logging

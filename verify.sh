@@ -134,9 +134,15 @@ if [ -n "$CG" ] && [ -d "$PROJECT_DIR/.code-graph" ]; then
 
   vec="$(printf '%s' "$health" | grep -i '^Search:' || true)"
   if printf '%s' "$vec" | grep -qi 'vector inactive'; then
-    warn "semantic search is FTS5/BM25 only — the embedding model downloads lazily in the background on first vector query"
+    # The lazy background download often never fires at all — doctor keeps
+    # reporting "no download has ever been attempted" indefinitely, while
+    # semantic_code_search quietly degrades to keyword matching and still
+    # returns plausible results. ./install-model.sh installs the weights by hand.
+    warn "semantic search is keyword-only (FTS5/BM25), not vector — run ./install-model.sh"
   else
     ok "${vec:-vector search active}"
+    printf '%s' "$vec" | grep -qi 'in progress' \
+      && info "embedding coverage still filling — re-run ./install-model.sh to finish"
   fi
 else
   [ -n "$CG" ] && fail "no .code-graph/ index in $PROJECT_DIR — run ./install.sh"

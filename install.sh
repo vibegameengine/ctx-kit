@@ -195,11 +195,15 @@ else
     health="$( cd "$PROJECT_DIR" && "$CG" health-check 2>&1 | head -1 || true )"
     ok "${health:-index built}"
 
-    # The embedding model is lazy: it downloads in the background on the first
-    # real vector query, not at install time. Kick it off now so semantic search
-    # is warm by the time it is wanted. Nothing here blocks on it.
-    ( cd "$PROJECT_DIR" && "$CG" search "warm up the embedding model" >/dev/null 2>&1 & ) || true
-    info "embedding model download nudged (background; vector search stays FTS5-only until it lands)"
+    # Vector search needs an embedding model the binary is supposed to fetch
+    # "lazily on first use". Observed reality: that download can simply never
+    # fire — `doctor` keeps reporting "no download has ever been attempted"
+    # while semantic_code_search silently degrades to keyword matching. Nudging
+    # it with a query does not help, so do not pretend it does; point at the
+    # script that installs the weights deterministically instead.
+    if ( cd "$PROJECT_DIR" && "$CG" health-check 2>&1 | grep -qi 'vector inactive' ); then
+      info "vector search inactive — run ./install-model.sh to install the embedding model (~80 MB)"
+    fi
   fi
 fi
 

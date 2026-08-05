@@ -16,6 +16,14 @@ Or from inside the repo you want to configure:
 ./uninstall.sh        # roll back
 ```
 
+On Windows, same thing with the PowerShell scripts — see [Windows](#windows):
+
+```powershell
+.\install.ps1
+.\verify.ps1
+.\uninstall.ps1
+```
+
 The kit itself can live anywhere. All it puts in the target repo is
 `.claude/settings.local.json` plus two `.gitignore` lines.
 
@@ -123,6 +131,71 @@ model is machine-wide and the MCP server inherits its environment from Claude Co
 **Restart Claude Code afterwards** — until then the CLI has the model but the running
 server does not.
 
+## Windows
+
+`install.ps1` / `verify.ps1` / `uninstall.ps1` / `install-model.ps1` are the Windows
+counterparts, and they are not a translation for its own sake — every failure below is
+one the POSIX scripts cannot see, and each of them fails *silently*.
+
+Both platforms generate their hooks from the same `lib/settings.mjs`, so the two can
+never drift apart. Windows PowerShell 5.1 is enough; nothing needs installing.
+
+**The hook is PowerShell, and pinned.** Claude Code runs a Windows hook through Git Bash
+*when Git for Windows is present*, and falls back to PowerShell when it is not. A
+bash-only hook is therefore silently dead on a machine without Git Bash. Every generated
+Windows hook carries `"shell": "powershell"` so which shells happen to be installed stops
+mattering.
+
+**The exe is not on PATH — anywhere.** On macOS/Linux the trap is a `#!/usr/bin/env node`
+shim whose shebang cannot find node (`exit 127`). On Windows that trap does not exist:
+`code-graph-mcp.exe` is native and needs nothing on PATH once its path is known. The
+Windows trap is the mirror image — the plugin *downloads* that exe into `~\.cache\code-graph\bin`
+and installs no npm shim at all, so `Get-Command code-graph-mcp` finds nothing on a machine
+where the tool is present and working. The hooks resolve it by path (cache file first);
+`install.ps1` triggers the download itself instead of printing "restart Claude Code and
+re-run".
+
+**compressmcp's MCP registration cannot start on Windows.** Its installer writes
+`{"command": "compressmcp", "args": ["--server"]}`, which Claude Code spawns in exec form —
+no shell. On Windows the extensionless npm shim is not an executable (`ENOENT`), and the
+`.cmd` shim is refused by Node >= 18.20, which will not spawn `.cmd`/`.bat` without a shell
+(`EINVAL`). The server never starts and nothing reports it. `install.ps1` rewrites the entry
+to `node <entry> --server`; `verify.ps1` fails if it finds anything else.
+
+**`env -i` does not translate.** Clearing a child's environment block on Windows makes
+`CreateProcess` fail for every native exe the command runs — with no output, no exit code
+and no error. A probe written that way passes while proving nothing. `verify.ps1` keeps the
+block and strips *PATH* instead, down to the system minimum: that is what actually catches a
+hook which only worked because your shell had node / npm / Git Bash on it.
+
+**Three PowerShell traps the scripts encode, because each one looks correct:**
+
+- The `.ps1` files are **pure ASCII on purpose.** Windows PowerShell 5.1 reads a BOM-less
+  script as the ANSI code page, where a UTF-8 `✓` (and an em dash) decodes to bytes
+  including `0x93` — a smart quote, which PowerShell accepts as a *string delimiter*. One
+  tick inside a comment makes the whole script fail to parse.
+- `-like '*[ctx-kit]*'` is not a substring match. `[]` is a wildcard character class, so the
+  kit's own marker throws "not a valid wildcard pattern".
+- `$ErrorActionPreference = 'Stop'` plus a native command that writes to stderr is a killed
+  script: 5.1 wraps stderr lines in a `NativeCommandError` even when the exe exited 0, and
+  `code-graph-mcp` writes progress notes to stderr on nearly every call.
+
+**`git check-ignore` answers differently per shell.** Git's global excludes file resolves
+through `$HOME`, which Git Bash exports and PowerShell does not — so the same repo reports
+a path as ignored from bash and not ignored from PowerShell. `verify.ps1` asks the way Git
+Bash would, instead of reporting a false failure.
+
+**Line endings.** `.gitattributes` pins `*.sh` to LF. A Windows clone defaults to
+`core.autocrlf=true`; Git for Windows' own bash tolerates the stray `\r`, but the same
+checkout read from WSL or a Linux container dies on line 1 with `$'\r': command not found`.
+
+```powershell
+.\install.ps1 -ProjectDir C:\src\repo -Throttle 300 -Yes
+.\install-model.ps1 -NoEmbed
+.\verify.ps1 -NoProbe
+.\uninstall.ps1 -Global -PurgeIndex
+```
+
 ## After installing
 
 Claude Code only watches directories that already had a settings file when the session
@@ -153,6 +226,16 @@ Then `./verify.sh` should report the hooks firing.
                --purge-index      # also delete .code-graph/ (confirms first)
 ```
 
+The PowerShell scripts take the same options as native parameters:
+
+```
+.\install.ps1       -ProjectDir DIR  -Throttle SEC  -SkipPlugins  -SkipCompressMcp
+                    -NoIndex  -Yes
+.\install-model.ps1 -ProjectDir DIR  -ModelDir DIR  -NoEmbed
+.\verify.ps1        -ProjectDir DIR  -NoProbe
+.\uninstall.ps1     -ProjectDir DIR  -Global  -PurgeIndex  -Yes
+```
+
 ## Layout
 
 ```
@@ -161,9 +244,22 @@ install-model.sh    embedding model for vector search; separate because it is ~8
 verify.sh           evidence-based checks; exits non-zero on failure
 uninstall.sh        rollback; never deletes without an explicit flag
 lib/common.sh       CLI resolution, bare-env runner, logging
-lib/settings.mjs    merges/removes hooks in .claude/settings.local.json
+
+install.ps1         the same four, for Windows / PowerShell 5.1
+install-model.ps1
+verify.ps1
+uninstall.ps1
+lib/common.ps1      CLI resolution, stripped-PATH runner, logging
+
+lib/settings.mjs    merges/removes hooks in .claude/settings.local.json; emits the sh
+                    or the PowerShell flavour, so both platforms share one source
+lib/global-env.mjs  merges one key into ~/.claude/settings.json env
+lib/mcp-entry.mjs   repoints an MCP registration at `node <entry>` (exec-form safe)
 ```
 
 ## Requirements
 
-Node 18+, the `claude` CLI, git. macOS and Linux.
+Node 18+, the `claude` CLI, git.
+
+macOS and Linux use the `.sh` scripts; Windows uses the `.ps1` ones and needs nothing
+beyond Windows PowerShell 5.1, which every Windows install already has.

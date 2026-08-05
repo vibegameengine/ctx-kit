@@ -40,6 +40,7 @@ die() { printf '\n%serror:%s %s\n' "$C_RED" "$C_OFF" "$*" >&2; exit 1; }
 node_cli_search_globs() {
   local name="$1"
   printf '%s\n' \
+    "$HOME/.cache/code-graph/bin/$name" \
     "$HOME/.nvm/versions/node/"*"/bin/$name" \
     "$HOME/.volta/bin/$name" \
     "$HOME/.local/share/fnm/node-versions/"*"/installation/bin/$name" \
@@ -64,7 +65,7 @@ resolve_node_cli() {
 hook_prelude() {
   local name="$1"
   cat <<PRELUDE
-CG=\$(command -v $name 2>/dev/null); [ -x "\$CG" ] || CG=\$(ls -t "\$HOME"/.nvm/versions/node/*/bin/$name "\$HOME"/.volta/bin/$name "\$HOME"/.local/share/fnm/node-versions/*/installation/bin/$name "\$HOME"/.asdf/installs/nodejs/*/bin/$name /opt/homebrew/bin/$name /usr/local/bin/$name 2>/dev/null | head -1); [ -x "\$CG" ] || exit 0; export PATH="\$(dirname "\$CG"):\$PATH"
+CG=\$(command -v $name 2>/dev/null); [ -x "\$CG" ] || CG=\$(ls -t "\$HOME"/.cache/code-graph/bin/$name "\$HOME"/.nvm/versions/node/*/bin/$name "\$HOME"/.volta/bin/$name "\$HOME"/.local/share/fnm/node-versions/*/installation/bin/$name "\$HOME"/.asdf/installs/nodejs/*/bin/$name /opt/homebrew/bin/$name /usr/local/bin/$name 2>/dev/null | head -1); [ -x "\$CG" ] || exit 0; export PATH="\$(dirname "\$CG"):\$PATH"
 PRELUDE
 }
 

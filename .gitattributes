@@ -1,0 +1,11 @@
+# Windows clones default to core.autocrlf=true, which rewrites every checked-out
+# file to CRLF. A shell script with CRLF line endings is not portable: Git for
+# Windows' own bash tolerates the stray \r, but a bash reached any other way
+# (WSL, a Linux container mounting the same checkout, an msys build without the
+# igncr patch) fails on the first line with a bare `$'\r': command not found`.
+# Pin the endings per file type so the checkout is correct whatever the clone's
+# autocrlf happens to be.
+*.sh    text eol=lf
+*.mjs   text eol=lf
+*.ps1   text eol=crlf
+*.md    text

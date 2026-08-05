@@ -103,23 +103,8 @@ if [ ! -f "$GLOBAL_SETTINGS" ]; then
   mkdir -p "$(dirname "$GLOBAL_SETTINGS")"
   printf '{}\n' > "$GLOBAL_SETTINGS"
 fi
-node -e '
-  const fs = require("fs");
-  const [file, dir] = process.argv.slice(1);
-  let s = {};
-  const raw = fs.readFileSync(file, "utf8").trim();
-  if (raw) {
-    try { s = JSON.parse(raw); }
-    catch (e) {
-      console.error("refusing to modify malformed JSON: " + file + "\n  " + e.message);
-      process.exit(1);
-    }
-  }
-  if (s.env && s.env.CODE_GRAPH_MODEL_DIR === dir) { console.log("unchanged"); process.exit(0); }
-  s.env = { ...(s.env || {}), CODE_GRAPH_MODEL_DIR: dir };
-  fs.writeFileSync(file, JSON.stringify(s, null, 2) + "\n");
-  console.log("written");
-' "$GLOBAL_SETTINGS" "$MODEL_DIR" >/dev/null \
+CTX_KIT_GLOBAL_SETTINGS="$GLOBAL_SETTINGS" \
+  node "$KIT_DIR/lib/global-env.mjs" set CODE_GRAPH_MODEL_DIR "$MODEL_DIR" >/dev/null \
   && ok "CODE_GRAPH_MODEL_DIR set in ~/.claude/settings.json" \
   || die "could not update $GLOBAL_SETTINGS"
 

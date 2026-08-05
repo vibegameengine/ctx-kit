@@ -144,11 +144,37 @@ else
     fi
   fi
 
-  # Worth knowing: compressmcp compresses MCP tool responses. With no MCP
+  # Register the MCP server where Claude Code actually reads MCP config.
+  #
+  # compressmcp's own installer writes mcpServers into ~/.claude/settings.json.
+  # Claude Code never loads MCP servers from there — they live in ~/.claude.json
+  # (local/user scope) or a project .mcp.json. The entry it writes is therefore
+  # inert, while `compressmcp check` keeps reporting "MCP server: ✓ registered"
+  # because it reads back its own file. Observed: a machine where the server had
+  # never started once, with every status readout green.
+  #
+  # Registered as `node <entry>` rather than by bin name because Claude Code
+  # spawns MCP servers in exec form, with no shell: on Windows the extensionless
+  # npm shim is not executable (ENOENT) and Node >= 18.20 refuses the .cmd shim
+  # (EINVAL). `node <entry>` is correct on every platform.
+  if claude mcp list 2>/dev/null | grep -q '^compressmcp:'; then
+    ok "MCP server already registered with Claude Code"
+  else
+    ENTRY="$(node "$KIT_DIR/lib/mcp-entry.mjs" --name compressmcp 2>/dev/null || true)"
+    if [ -z "$ENTRY" ]; then
+      warn "could not locate compressmcp's entry point — register by hand: claude mcp add --scope user compressmcp -- node <entry> --server"
+    elif claude mcp add --scope user compressmcp -- node "$ENTRY" --server >/dev/null 2>&1; then
+      ok "MCP server registered with Claude Code"
+    else
+      warn "claude mcp add failed — register by hand: claude mcp add --scope user compressmcp -- node \"$ENTRY\" --server"
+    fi
+  fi
+
+  # Worth knowing: compressmcp compresses MCP tool responses. With no other MCP
   # servers configured it is pure overhead — hooks on every call, nothing to
   # compress. The two plugins above register servers, so this is normally fine.
-  if ! grep -q '"mcpServers"' "$HOME/.claude/settings.json" 2>/dev/null; then
-    warn "no MCP servers in ~/.claude/settings.json yet — compressmcp has nothing to compress until you add some"
+  if [ "$(claude mcp list 2>/dev/null | grep -c ':')" -le 1 ]; then
+    warn "no other MCP servers configured — compressmcp has nothing to compress until you add some"
   fi
 fi
 

@@ -64,7 +64,21 @@ step "compressmcp wiring"
 if [ -n "$CMCP" ]; then
   status="$("$CMCP" check 2>&1 || true)"
   printf '%s' "$status" | grep -q 'compress): *✓' && ok "PostToolUse compress hook" || fail "PostToolUse compress hook missing"
-  printf '%s' "$status" | grep -q 'MCP server: *✓'  && ok "MCP server registered"    || fail "MCP server not registered"
+
+  # NOT `compressmcp check`, and NOT the settings file. Its installer writes
+  # mcpServers into ~/.claude/settings.json, and Claude Code does not read MCP
+  # config from there at all — servers live in ~/.claude.json (local/user scope)
+  # or a project .mcp.json. So the entry is real, `compressmcp check` reports it
+  # as registered, any verifier that reads the same file agrees, and the server
+  # has never once started. Ask the only component whose opinion decides.
+  mcp_list="$(claude mcp list 2>/dev/null || true)"
+  if printf '%s' "$mcp_list" | grep -q '^compressmcp:.*Connected'; then
+    ok "MCP server connected (confirmed by claude mcp list)"
+  elif printf '%s' "$mcp_list" | grep -q '^compressmcp:'; then
+    fail "MCP server registered but not connecting — run: claude mcp get compressmcp"
+  else
+    fail "MCP server not registered where Claude Code reads it (~/.claude.json) — re-run ./install.sh"
+  fi
 
   # `compressmcp check` reports the status line as missing whenever something
   # else owns settings.json -> statusLine. That is a false alarm when code-graph's
@@ -159,7 +173,6 @@ if [ "$DO_PROBE" -eq 0 ]; then
 elif [ -z "$CG" ] || [ ! -f "$SETTINGS" ] || [ ! -d "$PROJECT_DIR/.code-graph" ]; then
   info "skipped (prerequisites missing)"
 else
-  PROBE_SYM="ctxKitProbe$$"
   # The probe must land somewhere the indexer actually walks: .code-graph/ is
   # gitignored and skipped, so a probe there would never be indexed and this
   # check would report a false failure. Prefer a real source directory.
@@ -169,51 +182,68 @@ else
   for d in src lib app source; do
     if [ -d "$PROJECT_DIR/$d" ]; then PROBE_DIR="$PROJECT_DIR/$d"; break; fi
   done || true
-  PROBE_FILE="$PROBE_DIR/__ctx_kit_probe_$$.ts"
   STAMP="$PROJECT_DIR/.code-graph/.auto-index-stamp"
   STAMP_BAK=""
   [ -f "$STAMP" ] && STAMP_BAK="$(cat "$STAMP")"
+  PROBE_FILE=""
 
   cleanup_probe() {
-    rm -f "$PROBE_FILE"
+    [ -n "$PROBE_FILE" ] && rm -f "$PROBE_FILE"
     if [ -n "$STAMP_BAK" ]; then printf '%s' "$STAMP_BAK" > "$STAMP"; else rm -f "$STAMP"; fi
     ( cd "$PROJECT_DIR" && "$CG" incremental-index --quiet ) >/dev/null 2>&1 || true
   }
   trap cleanup_probe EXIT
 
-  printf 'export function %s(): number { return 1; }\n' "$PROBE_SYM" > "$PROBE_FILE"
-  rm -f "$STAMP"
+  # BOTH hooks, not just one. They are nearly the same command, and "nearly" is
+  # exactly what a probe exists to catch: they differ in the throttle, in the
+  # stdin they are handed, and in which of them a broken exit code takes down (a
+  # non-zero UserPromptSubmit hook blocks every prompt). Verifying one and
+  # asserting the other's mere presence is how a dead SessionStart hook sits
+  # unnoticed for weeks.
+  for ev in SessionStart UserPromptSubmit; do
+    CMD="$(node -p "JSON.parse(require('fs').readFileSync('$SETTINGS','utf8')).hooks.$ev.flatMap(g=>g.hooks).find(h=>String(h.description||'').includes('$KIT_MARKER')).command" 2>/dev/null || true)"
+    if [ -z "$CMD" ]; then
+      fail "could not extract the $ev hook command from settings"
+      continue
+    fi
 
-  CMD="$(node -p "JSON.parse(require('fs').readFileSync('$SETTINGS','utf8')).hooks.UserPromptSubmit.flatMap(g=>g.hooks).find(h=>String(h.description||'').includes('$KIT_MARKER')).command" 2>/dev/null || true)"
+    PROBE_SYM="ctxKitProbe$ev$$"
+    PROBE_FILE="$PROBE_DIR/__ctx_kit_probe_${ev}_$$.ts"
+    printf 'export function %s(): number { return 1; }\n' "$PROBE_SYM" > "$PROBE_FILE"
+    # Cleared so the throttled hook cannot decide it ran recently enough.
+    rm -f "$STAMP"
 
-  if [ -z "$CMD" ]; then
-    fail "could not extract the UserPromptSubmit hook command from settings"
-  else
+    if [ "$ev" = "SessionStart" ]; then STDIN_JSON='{"source":"startup"}'; else STDIN_JSON='{"prompt":"probe"}'; fi
     set +e
-    run_in_bare_env "$CMD" '{"prompt":"probe"}' >/dev/null 2>&1
+    run_in_bare_env "$CMD" "$STDIN_JSON" >/dev/null 2>&1
     rc=$?
     set -e
     if [ "$rc" -ne 0 ]; then
-      fail "hook exited $rc in a bare shell (127 = binary or node not on PATH; the hook would fail silently)"
+      fail "$ev exited $rc in a bare shell (127 = binary or node not on PATH; the hook would fail silently)"
     else
-      ok "hook exits 0 in a bare shell (non-zero here would block every prompt)"
+      ok "$ev exits 0 in a bare shell"
     fi
 
     if ( cd "$PROJECT_DIR" && "$CG" search "$PROBE_SYM" 2>/dev/null | grep -q "$PROBE_SYM" ); then
-      ok "a brand-new symbol reached the graph through the hook"
+      ok "$ev put a brand-new symbol into the graph"
     else
-      fail "hook ran but the new symbol never reached the graph"
+      fail "$ev ran but the new symbol never reached the graph"
     fi
-  fi
+
+    rm -f "$PROBE_FILE"
+    PROBE_FILE=""
+    rm -f "$STAMP"
+    ( cd "$PROJECT_DIR" && "$CG" incremental-index --quiet ) >/dev/null 2>&1 || true
+
+    if ( cd "$PROJECT_DIR" && "$CG" search "$PROBE_SYM" 2>/dev/null | grep -q "$PROBE_SYM" ); then
+      fail "$ev: deleted probe still in the graph — deletions are not being reindexed"
+    else
+      ok "$ev: deleting the file removed it from the graph"
+    fi
+  done
 
   cleanup_probe
   trap - EXIT
-
-  if ( cd "$PROJECT_DIR" && "$CG" search "$PROBE_SYM" 2>/dev/null | grep -q "$PROBE_SYM" ); then
-    fail "deleted probe still in the graph — deletions are not being reindexed"
-  else
-    ok "deleting the file removed it from the graph"
-  fi
 fi
 
 # ---------------------------------------------------------------------------

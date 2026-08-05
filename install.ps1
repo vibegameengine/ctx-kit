@@ -155,29 +155,41 @@ if ($SkipCompressMcp) {
             if ($LASTEXITCODE -eq 0) { Write-Ok 'hooks + MCP server registered' } else { Write-Warn 'compressmcp install failed -- run it manually' }
         }
 
-        # Windows-only repair. compressmcp registers itself as
-        #   { "command": "compressmcp", "args": ["--server"] }
-        # which is EXEC form -- Claude Code spawns it with no shell. On Windows
-        # that cannot work: the extensionless npm shim is not a Windows
-        # executable (ENOENT), and the .cmd shim is refused by Node >= 18.20
-        # (EINVAL) which will not spawn .cmd/.bat without a shell. The server
-        # then never starts and nothing says so. Point it at the JS entry.
-        $entry = Resolve-NodeCliEntry 'compressmcp'
-        if ($entry) {
-            $fixed = & node (Join-Path $KitDir 'lib\mcp-entry.mjs') --name compressmcp --entry $entry
-            if ($LASTEXITCODE -eq 0 -and $fixed -eq 'rewritten') {
-                Write-Ok 'MCP registration rewritten to `node <entry> --server` (Windows cannot exec the .cmd shim)'
-            } elseif ($LASTEXITCODE -eq 0) {
-                Write-Ok 'MCP registration already in the Windows-safe form'
+        # Register the MCP server where Claude Code actually reads MCP config.
+        #
+        # compressmcp's own installer writes mcpServers into
+        # ~/.claude/settings.json. Claude Code never loads MCP servers from
+        # there -- they live in ~/.claude.json (local/user scope) or a project
+        # .mcp.json. The entry it writes is therefore inert, while
+        # `compressmcp check` keeps reporting the server as registered because
+        # it reads back its own file. Observed: a machine where the server had
+        # never started once, with every status readout green.
+        #
+        # Registered as `node <entry>` rather than by bin name because Claude
+        # Code spawns MCP servers in exec form, with no shell: on Windows the
+        # extensionless npm shim is not executable (ENOENT) and Node >= 18.20
+        # refuses the .cmd shim (EINVAL). Correct on every platform.
+        $mcpList = (& claude mcp list 2>$null | Out-String)
+        if ($mcpList -match '(?m)^compressmcp:') {
+            Write-Ok 'MCP server already registered with Claude Code'
+        } else {
+            $entry = & node (Join-Path $KitDir 'lib\mcp-entry.mjs') --name compressmcp 2>$null
+            if ($LASTEXITCODE -ne 0 -or -not $entry) {
+                Write-Warn 'could not locate compressmcp entry point -- register by hand: claude mcp add --scope user compressmcp -- node <entry> --server'
             } else {
-                Write-Warn 'could not rewrite the compressmcp MCP registration -- the server may fail to start'
+                & claude mcp add --scope user compressmcp -- node $entry --server *> $null
+                if ($LASTEXITCODE -eq 0) { Write-Ok 'MCP server registered with Claude Code' }
+                else { Write-Warn "claude mcp add failed -- register by hand: claude mcp add --scope user compressmcp -- node `"$entry`" --server" }
             }
         }
     }
 
-    $globalSettings = Join-Path $env:USERPROFILE '.claude\settings.json'
-    if (-not (Test-Path $globalSettings) -or -not ((Get-Content $globalSettings -Raw) -match '"mcpServers"')) {
-        Write-Warn 'no MCP servers in ~/.claude/settings.json yet -- compressmcp has nothing to compress until you add some'
+    # compressmcp compresses MCP tool responses. With no other MCP server
+    # configured it is pure overhead -- hooks on every call, nothing to
+    # compress. The two plugins above register servers, so this is normally fine.
+    $mcpList = (& claude mcp list 2>$null | Out-String)
+    if ((@($mcpList -split "`n" | Where-Object { $_ -match '^\S+:' }).Count) -le 1) {
+        Write-Warn 'no other MCP servers configured -- compressmcp has nothing to compress until you add some'
     }
 }
 

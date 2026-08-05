@@ -141,6 +141,13 @@ then `rebuild-index --confirm` and quote the before/after file counts.
 
 ## 8. Things that look right and are not
 
+- **Do not trust `compressmcp check` about the MCP server.** Its installer writes
+  `mcpServers` into `~/.claude/settings.json`, and Claude Code does not read MCP config
+  from there — servers live in `~/.claude.json` or a project `.mcp.json`. So its check
+  reports `✓ registered` off a file nothing loads. `verify` asks `claude mcp list`, which
+  is the only component whose answer decides. This trap caught the author of this kit: the
+  first version of `verify` read the same wrong file and reported a green tick for a server
+  that had never started.
 - **Do not re-run `compressmcp install` once it is wired.** Its installer overwrites
   `settings.json → statusLine`. If code-graph is also installed, its composite status
   line has already adopted compressmcp's as `_previous`; re-running replaces the

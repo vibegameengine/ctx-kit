@@ -113,6 +113,14 @@ misleadingly, because your interactive profile has already loaded nvm.
   silently drops code-graph's segment. `install.sh` detects this and skips.
 - **`compressmcp check` lies about the status line** in exactly that situation. `verify.sh`
   cross-checks `~/.claude/statusline-providers.json` before reporting it.
+- **compressmcp registers its MCP server in a file Claude Code does not read.** Its
+  installer writes `mcpServers` into `~/.claude/settings.json`; Claude Code loads MCP
+  servers from `~/.claude.json` (local/user scope) or a project `.mcp.json`, and never from
+  settings.json. The entry is therefore inert — while `compressmcp check` reports
+  `MCP server: ✓ registered`, because it reads back its own file. Observed on a machine
+  where the server had never started once, with every readout green. The kit registers it
+  with `claude mcp add` instead, and `verify` asks `claude mcp list` rather than any file:
+  the only component whose opinion decides is the one loading the config.
 - **Merge, never clobber.** `lib/settings.mjs` refuses to touch malformed JSON — overwriting
   it would silently disable every setting already in the file — and strips its own previous
   hooks before re-adding, so re-running never stacks duplicates.
@@ -188,9 +196,16 @@ to `node <entry> --server`; `verify.ps1` fails if it finds anything else.
 
 **`env -i` does not translate.** Clearing a child's environment block on Windows makes
 `CreateProcess` fail for every native exe the command runs — with no output, no exit code
-and no error. A probe written that way passes while proving nothing. `verify.ps1` keeps the
-block and strips *PATH* instead, down to the system minimum: that is what actually catches a
-hook which only worked because your shell had node / npm / Git Bash on it.
+and no error. A probe written that way passes while proving nothing: measured as a hook
+that "succeeded" in 266 ms on a repo whose index takes seven seconds to update.
+
+It also writes to your repository. Without `SystemDrive` / `ProgramData` /
+`ALLUSERSPROFILE`, Windows shell components inside the spawned process cannot expand
+`%SystemDrive%\ProgramData\Microsoft\Windows\Caches` and create it **literally**, relative
+to the working directory — leaving a folder actually named `%SystemDrive%` in the checkout,
+full of shell cache files. `verify.ps1` keeps the environment block and strips *PATH*
+instead, down to the system minimum: that is what actually catches a hook which only worked
+because your shell had node / npm / Git Bash on it.
 
 **Three PowerShell traps the scripts encode, because each one looks correct:**
 

@@ -80,34 +80,27 @@ function Resolve-NodeCli {
     return $null
 }
 
-# The JS entry point behind an npm-global CLI. Needed because Claude Code spawns
-# MCP servers in EXEC form (no shell): `compressmcp` is not spawnable at all
-# (ENOENT) and `compressmcp.cmd` fails with EINVAL on Node >= 18.20, which
-# refuses to spawn .cmd/.bat without a shell. `node <entry> --server` is the only
-# registration that works.
-function Resolve-NodeCliEntry {
-    param([string]$Name)
-    $pkgDir = Join-Path $env:APPDATA "npm\node_modules\$Name"
-    $pkgJson = Join-Path $pkgDir 'package.json'
-    if (-not (Test-Path $pkgJson)) { return $null }
-    $pkg = Get-Content $pkgJson -Raw | ConvertFrom-Json
-    $rel = $null
-    if ($pkg.bin -is [string]) { $rel = $pkg.bin }
-    elseif ($pkg.bin) { $rel = $pkg.bin.$Name }
-    if (-not $rel) { $rel = $pkg.main }
-    if (-not $rel) { return $null }
-    $entry = Join-Path $pkgDir ($rel -replace '/', '\')
-    if (Test-Path $entry) { return $entry }
-    return $null
-}
+# The JS entry point behind an npm-global CLI lives in lib/mcp-entry.mjs, not
+# here: both platforms need it to register an MCP server as `node <entry>`, and
+# one resolver that both installers call cannot disagree with itself.
 
 # ---------------------------------------------------------------------------
 # Run a command the way a hook shell sees the world.
 #
 # The POSIX kit uses `env -i`. The literal translation -- clearing the child's
-# environment block -- is WRONG on Windows: with an empty block, CreateProcess
-# fails for every native exe the command tries to run, silently, with no output
-# and no exit code. The test then "passes" while proving nothing.
+# environment block -- is WRONG on Windows, in two ways at once.
+#
+# First, with an empty block CreateProcess fails for every native exe the command
+# tries to run, silently, with no output and no exit code. The test then "passes"
+# while proving nothing: observed as a hook that "succeeded" in 266 ms on a repo
+# whose index takes seven seconds to update.
+#
+# Second, and worse, it writes to the user's repo. Without SystemDrive /
+# ProgramData / ALLUSERSPROFILE, Windows shell components inside the spawned
+# process cannot expand %SystemDrive%\ProgramData\Microsoft\Windows\Caches and
+# create it LITERALLY, relative to the working directory -- which for this probe
+# is the project root. The result is a directory actually named "%SystemDrive%"
+# sitting in someone's checkout, full of shell cache files.
 #
 # What actually differs for a hook on Windows is PATH, so that is what gets
 # stripped: down to the system minimum, with the inherited block otherwise

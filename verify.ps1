@@ -63,21 +63,25 @@ if ($CMCP) {
     # a smart quote, which PowerShell accepts as a string delimiter. One tick,
     # even inside a comment, and the whole script fails to parse.
     if ($status -match '\(compress\):\s+\S+\s+installed') { Write-Ok 'PostToolUse compress hook' } else { Write-Fail 'PostToolUse compress hook missing' }
-    if ($status -match 'MCP server:\s+\S+\s+registered') { Write-Ok 'MCP server registered' } else { Write-Fail 'MCP server not registered' }
 
-    # Windows-specific and invisible to `compressmcp check`, which only asks
-    # whether an entry exists -- not whether Windows can actually spawn it.
+    # NOT `compressmcp check`, and NOT the settings file. Its installer writes
+    # mcpServers into ~/.claude/settings.json, and Claude Code does not read MCP
+    # config from there at all -- servers live in ~/.claude.json (local/user
+    # scope) or a project .mcp.json. So the entry is real, `compressmcp check`
+    # reports it as registered, any verifier that reads the same file agrees,
+    # and the server has never once started. Ask the only component whose
+    # opinion decides. (Matched on the word, not the tick: ASCII-only file.)
+    $mcpList = (& claude mcp list 2>$null | Out-String)
+    if ($mcpList -match '(?m)^compressmcp:.*Connected') {
+        Write-Ok 'MCP server connected (confirmed by claude mcp list)'
+    } elseif ($mcpList -match '(?m)^compressmcp:') {
+        Write-Fail 'MCP server registered but not connecting -- run: claude mcp get compressmcp'
+    } else {
+        Write-Fail 'MCP server not registered where Claude Code reads it (~\.claude.json) -- re-run .\install.ps1'
+    }
+
     $globalSettings = Join-Path $env:USERPROFILE '.claude\settings.json'
     if (Test-Path $globalSettings) {
-        $gs = Get-Content $globalSettings -Raw | ConvertFrom-Json
-        $srv = $gs.mcpServers.compressmcp
-        if ($srv) {
-            if ($srv.command -eq 'node') {
-                Write-Ok 'MCP server spawns via `node <entry>` (exec-form safe on Windows)'
-            } else {
-                Write-Fail "MCP server registered as '$($srv.command)' -- Windows cannot exec an npm shim (ENOENT / EINVAL); re-run .\install.ps1"
-            }
-        }
         # `compressmcp check` reports the status line as missing whenever
         # something else owns settings.json -> statusLine. That is a false alarm
         # when code-graph's composite has adopted it as a provider.
@@ -181,7 +185,6 @@ if ($NoProbe) {
 } elseif (-not $CG -or -not $settings -or -not (Test-Path $indexDir)) {
     Write-Info 'skipped (prerequisites missing)'
 } else {
-    $sym = "ctxKitProbe$([Math]::Abs($PID))$(Get-Random -Maximum 99999)"
     # The probe must land somewhere the indexer actually walks: .code-graph\ is
     # gitignored and skipped, so a probe there would never be indexed and this
     # check would report a false failure.
@@ -190,23 +193,35 @@ if ($NoProbe) {
         $candidate = Join-Path $ProjectDir $d
         if (Test-Path $candidate) { $probeDir = $candidate; break }
     }
-    $probeFile = Join-Path $probeDir "__ctx_kit_probe_$PID.ts"
     $stamp = Join-Path $indexDir '.auto-index-stamp'
     $stampBak = $null
     if (Test-Path $stamp) { $stampBak = (Get-Content $stamp -Raw) }
 
-    $hook = @(Get-KitHook -Settings $settings -Event 'UserPromptSubmit')[0]
-    if (-not $hook) {
-        Write-Fail 'could not extract the UserPromptSubmit hook command from settings'
-    } else {
+    # BOTH hooks, not just one. They are nearly the same command, and "nearly"
+    # is exactly what a probe exists to catch: they differ in the throttle, in
+    # the stdin they are handed, and in which of them a broken exit code takes
+    # down (a non-zero UserPromptSubmit hook blocks every prompt). Verifying one
+    # and asserting the other's mere presence is how a dead SessionStart hook
+    # sits unnoticed for weeks.
+    foreach ($ev in @('SessionStart', 'UserPromptSubmit')) {
+        $hook = @(Get-KitHook -Settings $settings -Event $ev)[0]
+        if (-not $hook) {
+            Write-Fail "could not extract the $ev hook command from settings"
+            continue
+        }
+
+        $sym = "ctxKitProbe$ev$(Get-Random -Maximum 999999)"
+        $probeFile = Join-Path $probeDir "__ctx_kit_probe_${ev}_$PID.ts"
         "export function $sym(): number { return 1; }" | Set-Content -Path $probeFile -Encoding ascii
+        # Cleared so the throttled hook cannot decide it ran recently enough.
         Remove-Item $stamp -Force -ErrorAction SilentlyContinue
 
-        $run = Invoke-InBareEnv -Command $hook.command -WorkingDirectory $ProjectDir -StdinJson '{"prompt":"probe"}'
+        $stdin = if ($ev -eq 'SessionStart') { '{"source":"startup"}' } else { '{"prompt":"probe"}' }
+        $run = Invoke-InBareEnv -Command $hook.command -WorkingDirectory $ProjectDir -StdinJson $stdin
         if ($run.ExitCode -ne 0) {
-            Write-Fail "hook exited $($run.ExitCode) with a stripped PATH -- it would fail silently, and a non-zero UserPromptSubmit hook blocks every prompt"
+            Write-Fail "$ev exited $($run.ExitCode) with a stripped PATH -- it would fail silently"
         } else {
-            Write-Ok 'hook exits 0 with only system paths on PATH (no node, no npm, no Git Bash)'
+            Write-Ok "$ev exits 0 with only system paths on PATH (no node, no npm, no Git Bash)"
         }
 
         # Every query runs FROM the project: the CLI resolves .code-graph\ against
@@ -216,21 +231,23 @@ if ($NoProbe) {
         Push-Location $ProjectDir
         $hit = (& $CG search $sym 2>$null | Out-String)
         Pop-Location
-        if ($hit -match $sym) { Write-Ok 'a brand-new symbol reached the graph through the hook' }
-        else { Write-Fail 'hook ran but the new symbol never reached the graph' }
+        if ($hit -match $sym) { Write-Ok "$ev put a brand-new symbol into the graph" }
+        else { Write-Fail "$ev ran but the new symbol never reached the graph" }
 
-        # cleanup, then prove deletions are reindexed too
         Remove-Item $probeFile -Force -ErrorAction SilentlyContinue
-        if ($stampBak) { Set-Content -Path $stamp -Value $stampBak -NoNewline -Encoding ascii }
-        else { Remove-Item $stamp -Force -ErrorAction SilentlyContinue }
+        Remove-Item $stamp -Force -ErrorAction SilentlyContinue
         Push-Location $ProjectDir
         & $CG incremental-index --quiet *> $null
         $still = (& $CG search $sym 2>$null | Out-String)
         Pop-Location
-
-        if ($still -match $sym) { Write-Fail 'deleted probe still in the graph -- deletions are not being reindexed' }
-        else { Write-Ok 'deleting the file removed it from the graph' }
+        # ${ev} not $ev: a colon straight after a variable name makes PowerShell
+        # read it as a scope qualifier (the $env:PATH form) and refuse to parse.
+        if ($still -match $sym) { Write-Fail "${ev}: deleted probe still in the graph -- deletions are not being reindexed" }
+        else { Write-Ok "${ev}: deleting the file removed it from the graph" }
     }
+
+    if ($stampBak) { Set-Content -Path $stamp -Value $stampBak -NoNewline -Encoding ascii }
+    else { Remove-Item $stamp -Force -ErrorAction SilentlyContinue }
 }
 
 # ---------------------------------------------------------------------------

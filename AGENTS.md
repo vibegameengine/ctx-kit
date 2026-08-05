@@ -139,6 +139,24 @@ project actually is. If it is wildly off, find the directory responsible and exc
 Whichever you pick, **ask first** — you are changing what the user's own tools can see —
 then `rebuild-index --confirm` and quote the before/after file counts.
 
+**The file will not shrink on its own.** Dropping nodes returns their pages to SQLite's
+freelist, not to the operating system, and the CLI has no vacuum command: after cutting an
+index from 118k nodes to 7.6k, `index.db` still measured 473 MB, of which 78409 of 121138
+pages were free. Do not reach for deleting `.code-graph/` — while Claude Code is running,
+its MCP server holds the database open and the delete fails anyway. `VACUUM` rewrites the
+file in place, needs no process stopped, and takes a brief exclusive lock, so it fails
+cleanly with `SQLITE_BUSY` instead of corrupting anything if a server is mid-query:
+
+```bash
+sqlite3 .code-graph/index.db 'VACUUM;'
+# or, with no sqlite3 on the box, Node 22.5+ has it built in:
+node -e "const{DatabaseSync}=require('node:sqlite');const d=new DatabaseSync('.code-graph/index.db');d.exec('VACUUM');d.close()"
+```
+
+Measured: 473 MB → 165 MB, with `health-check --deep` afterwards reporting
+`quick_check ok · FTS drift 0 · orphan vectors 0`. Run that check afterwards and quote it —
+you have just rewritten a database under a live reader, so "it seemed fine" is not enough.
+
 ## 8. Things that look right and are not
 
 - **Do not trust `compressmcp check` about the MCP server.** Its installer writes

@@ -1,0 +1,18 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" width="256" height="256" role="img" aria-label="ctx-kit">
+<!-- Self-contained: pure geometry, no scripts, type, fonts, images or external URLs. -->
+  <title>ctx-kit</title>
+  <defs>
+    <linearGradient id="plate-logo" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#26BCD6"/>
+      <stop offset="1" stop-color="#0E9184"/>
+    </linearGradient>
+  </defs>
+  <g>
+    <rect x="9" y="9" width="238" height="238" rx="58" fill="url(#plate-logo)" stroke="#08596B" stroke-width="6"/>
+    <rect x="42" y="46" width="172" height="30" rx="15" fill="#04252E"/>
+    <rect x="70" y="92" width="116" height="30" rx="15" fill="#04252E"/>
+    <rect x="98" y="138" width="60" height="30" rx="15" fill="#04252E"/>
+    <circle cx="128" cy="197" r="27" fill="#FFB224" opacity="0.22"/>
+    <circle cx="128" cy="197" r="16" fill="#FFB224"/>
+  </g>
+</svg>

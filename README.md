@@ -1,7 +1,26 @@
-# ctx-kit
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="assets/hero-dark.svg">
+    <img src="assets/hero.svg" width="860"
+         alt="ctx-kit - three context-saving layers for Claude Code, wired and proven by a run">
+  </picture>
+</p>
 
-Drop-in setup for the three context-saving layers in Claude Code, plus the automatic
-reindexing wiring that none of them ship with.
+<p align="center">
+  <a href="LICENSE"><img alt="MIT licensed" src="https://img.shields.io/badge/license-MIT-0E9184?style=flat-square"></a>
+  <img alt="Runs on macOS, Linux and Windows" src="https://img.shields.io/badge/macOS%20%C2%B7%20Linux%20%C2%B7%20Windows-supported-0E9184?style=flat-square">
+  <img alt="Requires Node 18 or newer" src="https://img.shields.io/badge/node-18%2B-0E9184?style=flat-square">
+</p>
+
+**One command wires Claude Code's three context-saving layers into a repo — plus the
+automatic reindexing none of them ship with — and then proves each one with a run.**
+
+The proof is the point. All three layers fail *silently*: a hook that exits 127 reports
+nothing to the UI, an MCP server that cannot spawn simply never appears, and
+`semantic_code_search` degrades into keyword search while still returning plausible-looking
+results. If you drive Claude Code on a repo large enough that the context window is the
+bottleneck, this is the wiring you would otherwise get wrong by hand — on Unix and on
+Windows alike.
 
 ```bash
 git clone https://github.com/vibegameengine/ctx-kit
@@ -26,6 +45,11 @@ On Windows, same thing with the PowerShell scripts — see [Windows](#windows):
 
 The kit itself can live anywhere. All it puts in the target repo is
 `.claude/settings.local.json` plus two `.gitignore` lines.
+
+If an **agent** is doing the install, point it at [AGENTS.md](AGENTS.md) — the runbook
+for exactly that: the order of operations, the three paths it will touch outside the
+repo, the one step it cannot do for you, and the failures it would otherwise report as
+successes.
 
 ## What it sets up
 
@@ -250,6 +274,9 @@ install-model.ps1
 verify.ps1
 uninstall.ps1
 lib/common.ps1      CLI resolution, stripped-PATH runner, logging
+
+AGENTS.md           install runbook for an agent doing this on someone's behalf
+assets/             logo + hero banners (light and dark), self-contained SVG
 
 lib/settings.mjs    merges/removes hooks in .claude/settings.local.json; emits the sh
                     or the PowerShell flavour, so both platforms share one source

@@ -122,22 +122,46 @@ running MCP server does not.
 
 ## 7. If the index looks absurdly large
 
-The indexer walks the tree through the same ignore rules git uses. A repo carrying
-vendored third-party sources, reference checkouts or sample projects will index all of
-them, and they can easily outweigh the project's own code by an order of magnitude.
+A repo carrying vendored third-party sources, reference checkouts or sample projects
+indexes all of them, and they can outweigh the project's own code by an order of
+magnitude. Measured on one game repo: 7139 files and 118411 nodes, of which ~83% were
+someone else's engine sitting in `references/`.
 
 Check the file count in `verify`'s "Index health" line against your sense of how big the
-project actually is. If it is wildly off, find the directory responsible and exclude it:
+project actually is. If it is wildly off, this is the mechanism.
 
-- `.gitignore` — if the user is happy for git to ignore it too, and it is committed.
-- `.git/info/exclude` — local, uncommitted, invisible to other clones. The right choice
-  when the directory must stay untracked but the user does not want a repo-wide rule.
-- A `.ignore` file also works, but understand the cost first: ripgrep honours it too, so
-  every future `rg` in that repo silently stops searching the directory. Usually the
-  wrong trade.
+**Use a `.ignore` file in the repo root.** There is no code-graph-specific ignore file —
+`--ignore` on the CLI applies to `dead-code` only, and the binary contains no other
+ignore-file name. The indexer walks the tree with the Rust `ignore` crate, so it honours
+exactly what ripgrep and fd honour: `.gitignore`, `.ignore`, `.git/info/exclude`, and the
+global excludes. `.ignore` is the one that exists for precisely this — hide a directory
+from developer tooling without hiding it from git:
 
-Whichever you pick, **ask first** — you are changing what the user's own tools can see —
-then `rebuild-index --confirm` and quote the before/after file counts.
+```
+# .ignore, repo root
+references/
+```
+
+Verified: with that file, a directory drops out of the index and the rest of the tree
+stays. It also has a built-in skip list that costs nothing to know — `node_modules/` and
+`vendor/` are never indexed. `references/`, `third_party/`, `examples/` and anything else
+you might assume is skipped are not.
+
+The one consequence to tell the user about: **ripgrep reads `.ignore` too**, so `rg` in
+that repo stops searching the directory unless they pass `-u` / `--no-ignore`. That is
+usually what they want, but it is their call, not yours.
+
+The alternatives, and when they are actually better:
+
+- `.gitignore` — only if the directory should be invisible to git as well. Many projects
+  deliberately keep vendored or reference material untracked *and* un-ignored so it stays
+  in plain sight; adding it to `.gitignore` overrides that decision on their behalf.
+- `.git/info/exclude` — same effect as `.gitignore` but local and uncommitted, so other
+  clones and other agents keep the bloated index. Reach for it only when the exclusion is
+  genuinely personal to one machine.
+
+**Ask first** — you are changing what the user's own tools can see — then
+`rebuild-index --confirm` and quote the before/after file counts.
 
 **The file will not shrink on its own.** Dropping nodes returns their pages to SQLite's
 freelist, not to the operating system, and the CLI has no vacuum command: after cutting an

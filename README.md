@@ -12,15 +12,21 @@
   <img alt="Requires Node 18 or newer" src="https://img.shields.io/badge/node-18%2B-0E9184?style=flat-square">
 </p>
 
-**One command wires Claude Code's three context-saving layers into a repo — plus the
-automatic reindexing none of them ship with — and then proves each one with a run.**
+### Your session runs out of context long before it runs out of ideas.
 
-The proof is the point. All three layers fail *silently*: a hook that exits 127 reports
-nothing to the UI, an MCP server that cannot spawn simply never appears, and
-`semantic_code_search` degrades into keyword search while still returning plausible-looking
-results. If you drive Claude Code on a repo large enough that the context window is the
-bottleneck, this is the wiring you would otherwise get wrong by hand — on Unix and on
-Windows alike.
+One build log eats half the window. Then the agent reads half the tree to answer what the
+call graph already knew. Three compactions later you are re-explaining the task instead of
+shipping it.
+
+**ctx-kit sets up the fix in one command:**
+
+- 📄 **Big output stops entering the conversation.** Logs, snapshots and API payloads land
+  in a searchable sandbox instead of your context window.
+- 🕸 **Your repo becomes a graph the agent queries instead of reads.** "Who calls this?
+  What breaks if I change it?" — answered from the blast radius, not from forty files.
+- 🗜 **MCP responses arrive compressed**, losslessly, before they cost you anything.
+- 🔄 **And the graph stays fresh by itself** — the reindexing hooks none of the above ship
+  with, so it never goes quietly stale behind your back.
 
 ```bash
 git clone https://github.com/vibegameengine/ctx-kit
@@ -43,8 +49,15 @@ On Windows, same thing with the PowerShell scripts — see [Windows](#windows):
 .\uninstall.ps1
 ```
 
-The kit itself can live anywhere. All it puts in the target repo is
-`.claude/settings.local.json` plus two `.gitignore` lines.
+Two minutes, and it leaves almost no trace: `.claude/settings.local.json` plus two
+`.gitignore` lines in your repo. The kit itself can live anywhere, and `./uninstall.sh`
+takes it all back out.
+
+Then `./verify.sh` shows you it is actually working — by *running* every layer and checking
+what came out, not by reading back the config it just wrote. That distinction sounds
+pedantic until you learn that each of these layers fails **completely silently**, and a
+perfectly green config file is the normal look of a stack doing nothing at all.
+[Here is how that happens →](#the-gotcha-this-kit-exists-to-encode)
 
 If an **agent** is doing the install, point it at [AGENTS.md](AGENTS.md) — the runbook
 for exactly that: the order of operations, the three paths it will touch outside the

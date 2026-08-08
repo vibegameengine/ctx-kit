@@ -43,10 +43,17 @@ with `-Yes`.
 | `~/.claude/settings.json` | **machine-wide** | plugin registration, compressmcp hooks + MCP server + status line |
 | `~/.cache/code-graph/bin/` | **machine-wide** | the native `code-graph-mcp` binary (~44 MB) |
 | `~/.cache/code-graph/models-manual/` | **machine-wide** | the embedding model, only if you run `install-model` (~80 MB) |
+| `~/.claude/plugins/cache/context-mode/*/node_modules/` | **machine-wide** | the runtime deps context-mode publishes without (see §8) |
 
-Three of those are outside the repo. If the user only agreed to "set this up in my
-project", say that the last three are shared by every repo on the machine before you
+Four of those are outside the repo. If the user only agreed to "set this up in my
+project", say that the last four are shared by every repo on the machine before you
 proceed.
+
+The last row is the one to name out loud rather than let them discover: the kit writes
+into another plugin's installed tree. It only ever *adds* packages the plugin declares and
+failed to ship, never replaces one that is already there, and a `context-mode` update
+wipes the addition — which is why re-running the installer after a plugin update is part
+of the job, not a sign something broke.
 
 ## 3. Run the installer
 
@@ -190,6 +197,21 @@ you have just rewritten a database under a live reader, so "it seemed fine" is n
   is the only component whose answer decides. This trap caught the author of this kit: the
   first version of `verify` read the same wrong file and reported a green tick for a server
   that had never started.
+- **Do not trust `ctx_doctor` about context-mode either.** It reports runtimes, storage,
+  hooks and FTS5, and every one of them can be green on a plugin whose web layer cannot
+  load at all: context-mode publishes a `node_modules` holding `better-sqlite3` and
+  nothing else, while its bundle resolves `turndown` at runtime, so `ctx_fetch_and_index`
+  dies with `Cannot find module` the first time anyone calls it. `install` repairs this
+  and `verify` re-checks it by resolving the module from the bundle's own path. If you
+  are tempted to confirm it by grepping the bundle for `require("turndown")`, don't — the
+  file is minified, the surviving call reads `RT(import.meta.url).resolve("turndown")`,
+  and a `require`-anchored grep reports a clean bill of health on a bundle that
+  externalizes everything.
+- **Do not report the installer's index line without reading it.** `incremental-index`
+  cannot create an index, only update one, so on a never-indexed project it exits with
+  `No index found` — and the health line quoting that error used to print under a green
+  `[OK]`. If you see an index step whose `[OK]` contains the word `Error`, the index was
+  not built. Current versions pick `rebuild-index` in that case and fail loudly instead.
 - **Do not re-run `compressmcp install` once it is wired.** Its installer overwrites
   `settings.json → statusLine`. If code-graph is also installed, its composite status
   line has already adopted compressmcp's as `_previous`; re-running replaces the
@@ -197,6 +219,12 @@ you have just rewritten a database under a live reader, so "it seemed fine" is n
   skips — do not "helpfully" run it by hand.
 - **`compressmcp check` lies about the status line** in exactly that situation. `verify`
   cross-checks `~/.claude/statusline-providers.json` before believing it.
+- **Do not treat `not a git repository` as a warning you can leave behind.** The install
+  succeeds and the graph works — the indexer tracks changes by content hash, not by
+  `git diff` — but the `.gitignore` step is skipped and nothing revisits it. If the repo
+  is initialised later, `.claude/settings.local.json`, full of absolute machine paths,
+  is staged for its first commit. Say plainly that the installer has to be run once more
+  after `git init`.
 - **Do not hand-fill the default model cache dir.** `<cache>/code-graph/models` is only
   trusted once the binary's own `extract_and_promote` has written a `.model-id` marker;
   a manually populated copy is ignored. That is why `install-model` uses a separate

@@ -52,7 +52,11 @@ Write-Info "project: $ProjectDir"
 
 & git -C $ProjectDir rev-parse --git-dir *> $null
 $isGitRepo = ($LASTEXITCODE -eq 0)
-if (-not $isGitRepo) { Write-Warn 'not a git repository -- .gitignore wiring will be skipped' }
+# Worth stating as an instruction, not just a fact: nothing revisits this later.
+# A repo that gets `git init` after the install keeps a settings file full of
+# absolute machine paths staged for its first commit, and the kit never
+# mentions it again.
+if (-not $isGitRepo) { Write-Warn "not a git repository -- .gitignore wiring skipped; re-run this installer after 'git init'" }
 
 if (-not $Yes) {
     $reply = Read-Host "`nInstall into $ProjectDir? [y/N]"
@@ -89,6 +93,40 @@ if ($SkipPlugins) {
 
     Add-Marketplace 'sdsrss/code-graph-mcp' 'code-graph-mcp'
     Install-Plugin 'code-graph-mcp@code-graph-mcp' 'code-graph-mcp'
+}
+
+# ---------------------------------------------------------------------------
+Write-Step 'context-mode runtime deps'
+# ---------------------------------------------------------------------------
+# context-mode publishes a node_modules containing better-sqlite3 and nothing
+# else, while its bundle still resolves turndown at runtime. Every symptom of
+# that points somewhere else: the MCP server starts, every tool that avoids the
+# HTML path works, and `ctx_doctor` prints a full column of green because it
+# checks runtimes, storage, hooks and FTS5 -- none of which touch turndown. Only
+# ctx_fetch_and_index fails, at call time, with `Cannot find module`. So the
+# entire web layer is dead behind a diagnostic that says the install is healthy.
+#
+# Detection and repair both live in lib/plugin-deps.mjs so this and install.sh
+# cannot drift apart, exactly as the hook generator is shared.
+if ($SkipPlugins) {
+    Write-Info 'skipped (-SkipPlugins)'
+} else {
+    $depsScript = Join-Path $KitDir 'lib\plugin-deps.mjs'
+    $cmMissing = @(& node $depsScript 2>$null | Where-Object { $_ })
+    if ($LASTEXITCODE -ne 0) {
+        Write-Info 'context-mode plugin directory not found -- skipped'
+    } elseif ($cmMissing.Count -eq 0) {
+        Write-Ok 'every externalized dependency resolves'
+    } else {
+        Write-Info "shipped without: $($cmMissing -join ', ')"
+        & node $depsScript --repair *> $null
+        $cmStill = @(& node $depsScript 2>$null | Where-Object { $_ })
+        if ($cmStill.Count -eq 0) {
+            Write-Ok "installed into the plugin's node_modules -- a plugin update drops them again, so re-run this installer after one"
+        } else {
+            Write-Warn "could not install $($cmStill -join ', ') -- ctx_fetch_and_index will keep dying on 'Cannot find module'"
+        }
+    }
 }
 
 # ---------------------------------------------------------------------------
@@ -230,12 +268,29 @@ if ($NoIndex) {
 } elseif (-not $CG) {
     Write-Warn 'no code-graph-mcp binary -- skipping the initial index'
 } else {
-    Write-Info "indexing $ProjectDir (first run walks the whole tree; later runs are incremental)"
+    # `incremental-index` updates an index; it cannot create one. On a project
+    # that has never been indexed it exits with "No index found at
+    # .code-graph\index.db" and builds nothing -- which used to be invisible
+    # twice over: the error went to $null, and then the health-check line that
+    # reports the very same error went out under a green [OK]. Choose the
+    # command by whether the database is actually there.
     Push-Location $ProjectDir
-    & $CG incremental-index --quiet *> $null
+    if (Test-Path (Join-Path $ProjectDir '.code-graph\index.db')) {
+        Write-Info "updating the index of $ProjectDir (incremental)"
+        & $CG incremental-index --quiet *> $null
+    } else {
+        Write-Info "building the index of $ProjectDir from scratch (walks the whole tree; later runs are incremental)"
+        & $CG rebuild-index --confirm *> $null
+    }
     $health = (& $CG health-check 2>&1 | Out-String).Split("`n")[0]
     Pop-Location
-    if ($health) { Write-Ok $health.Trim() } else { Write-Ok 'index built' }
+    if ($health -match '^OK:') {
+        Write-Ok $health.Trim()
+    } else {
+        $detail = 'health-check printed nothing'
+        if ($health) { $detail = $health.Trim() }
+        Write-Fail "index not built: $detail"
+    }
 
     if ($health -match '(?i)vector inactive') {
         Write-Info 'vector search inactive -- run .\install-model.ps1 to install the embedding model (~80 MB)'

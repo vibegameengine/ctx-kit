@@ -134,6 +134,21 @@ misleadingly, because your interactive profile has already loaded nvm.
   where the server had never started once, with every readout green. The kit registers it
   with `claude mcp add` instead, and `verify` asks `claude mcp list` rather than any file:
   the only component whose opinion decides is the one loading the config.
+- **context-mode's own doctor is green on an install that cannot fetch.** The plugin
+  publishes a `node_modules` holding `better-sqlite3` and nothing else, while its bundle
+  still resolves `turndown` at runtime. The server starts, `ctx_doctor` checks runtimes,
+  storage, hooks and FTS5 and reports every one of them fine — none of those touch
+  turndown — and `ctx_fetch_and_index` alone dies with `Cannot find module`. The entire web
+  layer is gone behind a healthy readout. `install.sh` stages the missing packages in a
+  temp directory and copies them across; running `npm install` inside the plugin directory
+  instead dies on the bun lockfile it finds there (`Cannot read properties of null
+  (reading 'edgesOut')`). **A plugin update drops them again** — re-run the installer after
+  one. `verify.sh` resolves them the way the bundle does, from the bundle's own path.
+- **`incremental-index` cannot create an index, only update one.** On a project that has
+  never been indexed it exits with `No index found` and builds nothing — and the health
+  line reporting that error went out under a green `[OK]`, so the failure reached the user
+  looking like success. The installer now picks `rebuild-index` when there is no
+  `index.db`, and fails loudly on any health line that is not an `OK:`.
 - **Merge, never clobber.** `lib/settings.mjs` refuses to touch malformed JSON — overwriting
   it would silently disable every setting already in the file — and strips its own previous
   hooks before re-adding, so re-running never stacks duplicates.
@@ -310,11 +325,18 @@ lib/settings.mjs    merges/removes hooks in .claude/settings.local.json; emits t
                     or the PowerShell flavour, so both platforms share one source
 lib/global-env.mjs  merges one key into ~/.claude/settings.json env
 lib/mcp-entry.mjs   repoints an MCP registration at `node <entry>` (exec-form safe)
+lib/plugin-deps.mjs finds and installs the runtime deps context-mode publishes without;
+                    shared, so both installers repair the same thing the same way
 ```
 
 ## Requirements
 
 Node 18+, the `claude` CLI, git.
+
+Without git the kit still installs and the graph still works — the indexer tracks changes
+by content hash, not by `git diff` — but the `.gitignore` step is skipped, and **nothing
+revisits it later**. Run the installer again after `git init`, or the settings file full of
+absolute machine paths sits staged for the first commit.
 
 macOS and Linux use the `.sh` scripts; Windows uses the `.ps1` ones and needs nothing
 beyond Windows PowerShell 5.1, which every Windows install already has.

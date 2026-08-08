@@ -58,6 +58,19 @@ for p in context-mode code-graph-mcp; do
   fi
 done
 
+# Installed is not the same as loadable. context-mode ships a node_modules with
+# better-sqlite3 and nothing else, while its bundle resolves turndown at
+# runtime — so the plugin is present, the server starts, `ctx_doctor` is green,
+# and ctx_fetch_and_index alone dies on `Cannot find module`. Nothing but an
+# actual resolution attempt distinguishes that from a working install.
+if cm_missing="$(node "$KIT_DIR/lib/plugin-deps.mjs" 2>/dev/null)"; then
+  if [ -z "$cm_missing" ]; then
+    ok "context-mode's externalized deps all resolve"
+  else
+    fail "context-mode cannot resolve $(printf '%s' "$cm_missing" | tr '\n' ' ' | sed 's/[[:space:]]*$//') — its web layer is dead; run ./install.sh to repair"
+  fi
+fi
+
 # ---------------------------------------------------------------------------
 step "compressmcp wiring"
 # ---------------------------------------------------------------------------

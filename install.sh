@@ -68,7 +68,11 @@ ok "node $(node -v), claude CLI present"
 
 info "project: $PROJECT_DIR"
 if ! git -C "$PROJECT_DIR" rev-parse --git-dir >/dev/null 2>&1; then
-  warn "not a git repository — .gitignore wiring will be skipped"
+  # Worth stating as an instruction, not just a fact: nothing revisits this
+  # later. A repo that gets `git init` after the install keeps a settings file
+  # full of absolute machine paths staged for its first commit, and the kit
+  # never mentions it again.
+  warn "not a git repository — .gitignore wiring skipped; re-run this installer after 'git init'"
 fi
 
 if [ "$ASSUME_YES" -eq 0 ] && [ -t 0 ]; then
@@ -111,6 +115,35 @@ else
 
   add_marketplace "sdsrss/code-graph-mcp" "code-graph-mcp"
   install_plugin "code-graph-mcp@code-graph-mcp" "code-graph-mcp"
+fi
+
+# ---------------------------------------------------------------------------
+step "context-mode runtime deps"
+# ---------------------------------------------------------------------------
+# context-mode publishes a node_modules containing better-sqlite3 and nothing
+# else, while its bundle still resolves turndown at runtime. Every symptom of
+# that points somewhere else: the MCP server starts, every tool that avoids the
+# HTML path works, and `ctx_doctor` prints a full column of green because it
+# checks runtimes, storage, hooks and FTS5 — none of which touch turndown. Only
+# ctx_fetch_and_index fails, at call time, with `Cannot find module`. So the
+# entire web layer is dead behind a diagnostic that says the install is healthy.
+if [ "$DO_PLUGINS" -eq 0 ]; then
+  info "skipped (--skip-plugins)"
+elif cm_missing="$(node "$KIT_DIR/lib/plugin-deps.mjs" 2>/dev/null)"; then
+  if [ -z "$cm_missing" ]; then
+    ok "every externalized dependency resolves"
+  else
+    info "shipped without: $(printf '%s' "$cm_missing" | tr '\n' ' ' | sed 's/[[:space:]]*$//')"
+    node "$KIT_DIR/lib/plugin-deps.mjs" --repair >/dev/null 2>&1 || true
+    cm_still="$(node "$KIT_DIR/lib/plugin-deps.mjs" 2>/dev/null || true)"
+    if [ -z "$cm_still" ]; then
+      ok "installed into the plugin's node_modules — a plugin update drops them again, so re-run this installer after one"
+    else
+      warn "could not install $(printf '%s' "$cm_still" | tr '\n' ' ' | sed 's/[[:space:]]*$//') — ctx_fetch_and_index will keep dying on 'Cannot find module'"
+    fi
+  fi
+else
+  info "context-mode plugin directory not found — skipped"
 fi
 
 # ---------------------------------------------------------------------------
@@ -216,10 +249,25 @@ else
     warn "code-graph-mcp CLI not found yet — restart Claude Code once, then re-run this installer"
   else
     export PATH="$(dirname "$CG"):$PATH"
-    info "indexing $PROJECT_DIR (first run walks the whole tree; later runs are incremental)"
-    ( cd "$PROJECT_DIR" && "$CG" incremental-index --quiet ) >/dev/null 2>&1 || true
+    # `incremental-index` updates an index; it cannot create one. On a project
+    # that has never been indexed it exits with "No index found at
+    # .code-graph/index.db" and builds nothing — which used to be invisible
+    # twice over: the error went to /dev/null, and then the health-check line
+    # that reports the very same error went out under a green [OK]. Choose the
+    # command by whether the database is actually there.
+    if [ -f "$PROJECT_DIR/.code-graph/index.db" ]; then
+      info "updating the index of $PROJECT_DIR (incremental)"
+      ( cd "$PROJECT_DIR" && "$CG" incremental-index --quiet ) >/dev/null 2>&1 || true
+    else
+      info "building the index of $PROJECT_DIR from scratch (walks the whole tree; later runs are incremental)"
+      ( cd "$PROJECT_DIR" && "$CG" rebuild-index --confirm ) >/dev/null 2>&1 || true
+    fi
     health="$( cd "$PROJECT_DIR" && "$CG" health-check 2>&1 | head -1 || true )"
-    ok "${health:-index built}"
+    if printf '%s' "$health" | grep -q '^OK:'; then
+      ok "$health"
+    else
+      fail "index not built: ${health:-health-check printed nothing}"
+    fi
 
     # Vector search needs an embedding model the binary is supposed to fetch
     # "lazily on first use". Observed reality: that download can simply never

@@ -18,6 +18,7 @@
 [CmdletBinding()]
 param(
     [string]$ProjectDir,
+    [ValidateSet('Both', 'Claude', 'Codex')][string]$Target = 'Both',
     [switch]$NoProbe
 )
 
@@ -26,6 +27,25 @@ $KitDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 
 $ProjectDir = Resolve-ProjectDir $ProjectDir
 $SettingsPath = Join-Path $ProjectDir '.claude\settings.local.json'
+if ($Target -eq 'Codex') {
+    & (Join-Path $KitDir 'lib\verify-codex.ps1') -ProjectDir $ProjectDir -NoProbe
+    if (-not $NoProbe) {
+        $CG = Resolve-CodeGraphBinary
+        if ($CG) {
+            & node (Join-Path $KitDir 'lib\verify-hooks.mjs') --project-dir $ProjectDir --binary $CG --target Codex
+            if ($LASTEXITCODE -ne 0) { Write-Fail 'configured Codex hook/MCP probe failed' }
+        } else { Write-Fail 'code-graph binary missing' }
+    }
+    Write-Host ''
+    if ($Global:CtxKit.Failures -gt 0) {
+        Write-Host "$($Global:CtxKit.Failures) failed" -ForegroundColor Red -NoNewline
+        Write-Host ", $($Global:CtxKit.Warnings) warnings"
+        exit 1
+    }
+    Write-Host 'All checks passed' -ForegroundColor Green -NoNewline
+    Write-Host " ($($Global:CtxKit.Warnings) warnings)"
+    exit 0
+}
 
 # ---------------------------------------------------------------------------
 Write-Step 'Toolchain'
@@ -127,7 +147,8 @@ if (-not (Test-Path $SettingsPath)) {
     }
 
     if ($settings) {
-        if ($settings.env.CODE_GRAPH_HOOK_INDEX -eq 'on') { Write-Ok 'env CODE_GRAPH_HOOK_INDEX=on' }
+        if ($settings.env.CODE_GRAPH_BIN -and $settings.env.CODE_GRAPH_HOOK_INDEX -eq 'off') { Write-Ok 'project binary uses its own PostToolUse hook; shared plugin writer disabled' }
+        elseif ($settings.env.CODE_GRAPH_HOOK_INDEX -eq 'on') { Write-Ok 'env CODE_GRAPH_HOOK_INDEX=on' }
         else { Write-Fail "env CODE_GRAPH_HOOK_INDEX not set to 'on'" }
 
         foreach ($ev in @('SessionStart', 'UserPromptSubmit')) {
@@ -149,7 +170,12 @@ if (-not (Test-Path $SettingsPath)) {
         }
     }
 
-    if ($env:CODE_GRAPH_HOOK_INDEX -eq 'on') {
+    if ($settings.env.CODE_GRAPH_BIN -and $settings.env.CODE_GRAPH_HOOK_INDEX -eq 'off') {
+        $writes = @(Get-KitHook -Settings $settings -Event 'PostToolUse')
+        if ($writes.Count -eq 1) { Write-Ok 'local PostToolUse writer present; shared plugin writer intentionally off' }
+        else { Write-Fail 'expected one local PostToolUse writer' }
+        Write-Info 'reload Claude/Codex to activate project-local configuration in a new session'
+    } elseif ($env:CODE_GRAPH_HOOK_INDEX -eq 'on') {
         Write-Ok "CODE_GRAPH_HOOK_INDEX is live in this shell's session"
     } else {
         Write-Warn 'CODE_GRAPH_HOOK_INDEX not visible in the environment -- open /hooks once or restart Claude Code'
@@ -196,75 +222,16 @@ Write-Step 'Hook probe (stripped PATH)'
 # ---------------------------------------------------------------------------
 if ($NoProbe) {
     Write-Info 'skipped (-NoProbe)'
-} elseif (-not $CG -or -not $settings -or -not (Test-Path $indexDir)) {
-    Write-Info 'skipped (prerequisites missing)'
-} else {
-    # The probe must land somewhere the indexer actually walks: .code-graph\ is
-    # gitignored and skipped, so a probe there would never be indexed and this
-    # check would report a false failure.
-    $probeDir = $ProjectDir
-    foreach ($d in @('src', 'lib', 'app', 'source')) {
-        $candidate = Join-Path $ProjectDir $d
-        if (Test-Path $candidate) { $probeDir = $candidate; break }
-    }
-    $stamp = Join-Path $indexDir '.auto-index-stamp'
-    $stampBak = $null
-    if (Test-Path $stamp) { $stampBak = (Get-Content $stamp -Raw) }
-
-    # BOTH hooks, not just one. They are nearly the same command, and "nearly"
-    # is exactly what a probe exists to catch: they differ in the throttle, in
-    # the stdin they are handed, and in which of them a broken exit code takes
-    # down (a non-zero UserPromptSubmit hook blocks every prompt). Verifying one
-    # and asserting the other's mere presence is how a dead SessionStart hook
-    # sits unnoticed for weeks.
-    foreach ($ev in @('SessionStart', 'UserPromptSubmit')) {
-        $hook = @(Get-KitHook -Settings $settings -Event $ev)[0]
-        if (-not $hook) {
-            Write-Fail "could not extract the $ev hook command from settings"
-            continue
-        }
-
-        $sym = "ctxKitProbe$ev$(Get-Random -Maximum 999999)"
-        $probeFile = Join-Path $probeDir "__ctx_kit_probe_${ev}_$PID.ts"
-        "export function $sym(): number { return 1; }" | Set-Content -Path $probeFile -Encoding ascii
-        # Cleared so the throttled hook cannot decide it ran recently enough.
-        Remove-Item $stamp -Force -ErrorAction SilentlyContinue
-
-        $stdin = if ($ev -eq 'SessionStart') { '{"source":"startup"}' } else { '{"prompt":"probe"}' }
-        $run = Invoke-InBareEnv -Command $hook.command -WorkingDirectory $ProjectDir -StdinJson $stdin
-        if ($run.ExitCode -ne 0) {
-            Write-Fail "$ev exited $($run.ExitCode) with a stripped PATH -- it would fail silently"
-        } else {
-            Write-Ok "$ev exits 0 with only system paths on PATH (no node, no npm, no Git Bash)"
-        }
-
-        # Every query runs FROM the project: the CLI resolves .code-graph\ against
-        # the current directory, so a search made from wherever the operator
-        # happened to be standing reads a DIFFERENT repo's index -- and reports
-        # this probe as a failure while the hook did its job perfectly.
-        Push-Location $ProjectDir
-        $hit = (& $CG search $sym 2>$null | Out-String)
-        Pop-Location
-        if ($hit -match $sym) { Write-Ok "$ev put a brand-new symbol into the graph" }
-        else { Write-Fail "$ev ran but the new symbol never reached the graph" }
-
-        Remove-Item $probeFile -Force -ErrorAction SilentlyContinue
-        Remove-Item $stamp -Force -ErrorAction SilentlyContinue
-        Push-Location $ProjectDir
-        & $CG incremental-index --quiet *> $null
-        $still = (& $CG search $sym 2>$null | Out-String)
-        Pop-Location
-        # ${ev} not $ev: a colon straight after a variable name makes PowerShell
-        # read it as a scope qualifier (the $env:PATH form) and refuse to parse.
-        if ($still -match $sym) { Write-Fail "${ev}: deleted probe still in the graph -- deletions are not being reindexed" }
-        else { Write-Ok "${ev}: deleting the file removed it from the graph" }
-    }
-
-    if ($stampBak) { Set-Content -Path $stamp -Value $stampBak -NoNewline -Encoding ascii }
-    else { Remove-Item $stamp -Force -ErrorAction SilentlyContinue }
-}
+} elseif ($CG -and (Test-Path $indexDir)) {
+    & node (Join-Path $KitDir 'lib\verify-hooks.mjs') --project-dir $ProjectDir --binary $CG --target $Target
+    if ($LASTEXITCODE -ne 0) { Write-Fail 'configured hook/MCP probe failed' }
+} else { Write-Fail 'hook probe prerequisites missing' }
 
 # ---------------------------------------------------------------------------
+if ($Target -eq 'Both') {
+    & (Join-Path $KitDir 'lib\verify-codex.ps1') -ProjectDir $ProjectDir -NoProbe
+}
+
 Write-Host ''
 if ($Global:CtxKit.Failures -gt 0) {
     Write-Host "$($Global:CtxKit.Failures) failed" -ForegroundColor Red -NoNewline

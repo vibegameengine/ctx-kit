@@ -23,6 +23,7 @@
 param(
     [string]$ProjectDir,
     [int]$Throttle = 120,
+    [ValidateSet('Both', 'Claude', 'Codex')][string]$Target = 'Both',
     [switch]$SkipPlugins,
     [switch]$SkipCompressMcp,
     [switch]$NoIndex,
@@ -34,12 +35,24 @@ $KitDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 
 if ($Throttle -lt 0) { Stop-WithError "invalid -Throttle: $Throttle" }
 $ProjectDir = Resolve-ProjectDir $ProjectDir
+$UseClaude = $Target -in @('Both', 'Claude')
+$UseCodex = $Target -in @('Both', 'Codex')
+$EffectiveTarget = $Target
 
 # ---------------------------------------------------------------------------
 Write-Step 'Preflight'
 # ---------------------------------------------------------------------------
 if (-not (Test-CommandExists node)) { Stop-WithError 'node not found on PATH -- install Node.js 18+ first' }
-if (-not (Test-CommandExists claude)) { Stop-WithError 'claude not found on PATH -- install Claude Code first: https://claude.com/claude-code' }
+if ($UseClaude -and -not (Test-CommandExists claude)) { Stop-WithError 'claude not found on PATH -- install Claude Code first: https://claude.com/claude-code' }
+if ($UseCodex -and -not (Test-CommandExists codex)) {
+    if ($Target -eq 'Both') {
+        $UseCodex = $false
+        $EffectiveTarget = 'Claude'
+        Write-Warn 'codex not found -- continuing with the existing Claude-only integration; install Codex and re-run -Target Both later'
+    } else {
+        Stop-WithError 'codex not found on PATH -- install Codex first'
+    }
+}
 
 # Parsed here rather than with `node -p "expr"`: Windows PowerShell 5.1 rewrites
 # the argument vector on its way to a native exe and eats the embedded double
@@ -47,7 +60,7 @@ if (-not (Test-CommandExists claude)) { Stop-WithError 'claude not found on PATH
 # syntax error that reads like a broken Node install.
 $nodeMajor = [int]((& node -v).TrimStart('v').Split('.')[0])
 if ($nodeMajor -lt 18) { Stop-WithError "Node 18+ required, found $(& node -v)" }
-Write-Ok "node $(& node -v), claude CLI present"
+Write-Ok "node $(& node -v)$(if($UseClaude){', Claude CLI present'})$(if($UseCodex){', Codex CLI present'})"
 Write-Info "project: $ProjectDir"
 
 & git -C $ProjectDir rev-parse --git-dir *> $null
@@ -68,7 +81,7 @@ Write-Step 'Plugins (context-mode, code-graph-mcp)'
 # ---------------------------------------------------------------------------
 if ($SkipPlugins) {
     Write-Info 'skipped (-SkipPlugins)'
-} else {
+} elseif ($UseClaude) {
     $installedPlugins = (& claude plugin list 2>$null | Out-String)
     $marketplaces = (& claude plugin marketplace list 2>$null | Out-String)
 
@@ -93,7 +106,7 @@ if ($SkipPlugins) {
 
     Add-Marketplace 'sdsrss/code-graph-mcp' 'code-graph-mcp'
     Install-Plugin 'code-graph-mcp@code-graph-mcp' 'code-graph-mcp'
-}
+} else { Write-Info 'Claude plugin bootstrap skipped (-Target Codex)' }
 
 # ---------------------------------------------------------------------------
 Write-Step 'context-mode runtime deps'
@@ -110,7 +123,7 @@ Write-Step 'context-mode runtime deps'
 # cannot drift apart, exactly as the hook generator is shared.
 if ($SkipPlugins) {
     Write-Info 'skipped (-SkipPlugins)'
-} else {
+} elseif ($UseClaude) {
     $depsScript = Join-Path $KitDir 'lib\plugin-deps.mjs'
     $cmMissing = @(& node $depsScript 2>$null | Where-Object { $_ })
     if ($LASTEXITCODE -ne 0) {
@@ -127,7 +140,7 @@ if ($SkipPlugins) {
             Write-Warn "could not install $($cmStill -join ', ') -- ctx_fetch_and_index will keep dying on 'Cannot find module'"
         }
     }
-}
+} else { Write-Info 'context-mode repair skipped (-Target Codex)' }
 
 # ---------------------------------------------------------------------------
 Write-Step 'code-graph-mcp binary'
@@ -160,9 +173,11 @@ if ($CG) {
 }
 
 # ---------------------------------------------------------------------------
-Write-Step 'compressmcp (MCP response compression)'
+Write-Step 'compressmcp (Claude MCP response compression)'
 # ---------------------------------------------------------------------------
-if ($SkipCompressMcp) {
+if (-not $UseClaude) {
+    Write-Info 'skipped (-Target Codex; Codex uses its own request compression)'
+} elseif ($SkipCompressMcp) {
     Write-Info 'skipped (-SkipCompressMcp)'
 } else {
     $cmcp = Resolve-NodeCli 'compressmcp'
@@ -234,19 +249,44 @@ if ($SkipCompressMcp) {
 # ---------------------------------------------------------------------------
 Write-Step 'Project hooks (automatic reindexing)'
 # ---------------------------------------------------------------------------
-$settingsPath = & node (Join-Path $KitDir 'lib\settings.mjs') apply --project-dir $ProjectDir --throttle $Throttle --shell powershell
-if ($LASTEXITCODE -ne 0) { Stop-WithError 'could not write .claude/settings.local.json' }
-Write-Ok "wrote $($settingsPath.Replace($ProjectDir + '\', ''))"
-Write-Info 'env CODE_GRAPH_HOOK_INDEX=on   -> agent Write/Edit indexed immediately'
-Write-Info 'SessionStart hook              -> catches git pull / editor edits between sessions'
-Write-Info "UserPromptSubmit hook (${Throttle}s)  -> catches edits outside the agent mid-session"
+if ($UseClaude) {
+    $settingsPath = & node (Join-Path $KitDir 'lib\settings.mjs') apply --project-dir $ProjectDir --throttle $Throttle --shell powershell
+    if ($LASTEXITCODE -ne 0) { Stop-WithError 'could not write .claude/settings.local.json' }
+    Write-Ok "Claude: wrote $($settingsPath.Replace($ProjectDir + '\', ''))"
+    if (Test-Path (Join-Path $ProjectDir '.ctx-kit.json')) { Write-Info 'Claude agent writes use the project-local code graph hook' }
+    else { Write-Info 'Claude env CODE_GRAPH_HOOK_INDEX=on -> agent Write/Edit indexed immediately' }
+}
+
+if ($UseCodex) {
+    $contextDir = & node (Join-Path $KitDir 'lib\plugin-deps.mjs') --dir 2>$null
+    $contextCli = if ($contextDir) { Join-Path $contextDir.Trim() 'cli.bundle.mjs' } else { $null }
+    if (-not $CG -or -not $contextCli -or -not (Test-Path $contextCli)) {
+        Stop-WithError 'Codex integration needs the shared context-mode and code-graph-mcp plugin bootstrap; run with -Target Both (or install the Claude plugins first)'
+    }
+    $nodePath = (Get-Command node -ErrorAction Stop).Source
+    $codexHooks = & node (Join-Path $KitDir 'lib\codex-hooks.mjs') apply --project-dir $ProjectDir --throttle $Throttle --node $nodePath --context-cli $contextCli --code-graph $CG
+    if ($LASTEXITCODE -ne 0) { Stop-WithError 'could not write .codex/hooks.json' }
+    Write-Ok "Codex: wrote $($codexHooks.Replace($ProjectDir + '\', ''))"
+
+    & node (Join-Path $KitDir 'lib\project-mcp.mjs') apply --project-dir $ProjectDir --target Codex --node $nodePath --context-cli $contextCli --code-graph $CG
+    if ($LASTEXITCODE -ne 0) { Stop-WithError 'could not write project-local Codex MCP config' }
+
+}
+
+if ($UseClaude -and (Test-Path (Join-Path $ProjectDir '.ctx-kit.json'))) {
+    & node (Join-Path $KitDir 'lib\project-mcp.mjs') apply --project-dir $ProjectDir --target Claude --node (Get-Command node).Source --context-cli unused --code-graph $CG
+    if ($LASTEXITCODE -ne 0) { Stop-WithError 'could not write project-local Claude MCP config' }
+}
 
 if ($isGitRepo) {
     $gi = Join-Path $ProjectDir '.gitignore'
     $existing = @()
     if (Test-Path $gi) { $existing = Get-Content $gi }
     $added = $false
-    foreach ($entry in @('.claude/settings.local.json', '.code-graph/')) {
+    $ignoreEntries = @('.code-graph/', '.ctx-kit/')
+    if ($UseClaude) { $ignoreEntries += '.claude/settings.local.json'; if (Test-Path (Join-Path $ProjectDir '.ctx-kit.json')) { $ignoreEntries += '.mcp.json' } }
+    if ($UseCodex) { $ignoreEntries += @('.codex/config.toml', '.codex/hooks.json', '.codex/hooks/ctx-kit-codex.ps1', '.codex/hooks/ctx-kit-codex.sh') }
+    foreach ($entry in $ignoreEntries) {
         if ($existing -contains $entry) {
             Write-Ok ".gitignore already has $entry"
             continue
@@ -300,17 +340,21 @@ if ($NoIndex) {
 # ---------------------------------------------------------------------------
 Write-Step 'Verify'
 # ---------------------------------------------------------------------------
-& (Join-Path $KitDir 'verify.ps1') -ProjectDir $ProjectDir
+& (Join-Path $KitDir 'verify.ps1') -ProjectDir $ProjectDir -Target $EffectiveTarget
+if ($LASTEXITCODE -ne 0) { Stop-WithError 'verification failed; installation is not complete' }
 
 Write-Host ''
 Write-Host 'Done.' -ForegroundColor Green -NoNewline
 Write-Host ' One manual step remains:'
 Write-Host ''
-Write-Host '  Open /hooks once in Claude Code (or restart it).' -ForegroundColor Blue
+if ($UseClaude) { Write-Host '  Open /hooks once in Claude Code (or restart it).' -ForegroundColor Blue }
+if ($UseCodex) { Write-Host '  Restart Codex after the MCP registration; project-local hooks are picked up in trusted projects.' -ForegroundColor Blue }
 Write-Host ''
-Write-Host '  Claude Code only watches directories that already had a settings file when'
-Write-Host '  the session started. A freshly created .claude/settings.local.json is not'
-Write-Host '  picked up until the config is reloaded -- the hooks are correct, just not'
-Write-Host '  live yet.'
+if ($UseClaude) {
+    Write-Host '  Claude Code only watches directories that already had a settings file when'
+    Write-Host '  the session started. A freshly created .claude/settings.local.json is not'
+    Write-Host '  picked up until the config is reloaded -- the hooks are correct, just not'
+    Write-Host '  live yet.'
+}
 Write-Host ''
 Write-Host '  Then re-run  .\verify.ps1  to confirm the hooks actually fire.'

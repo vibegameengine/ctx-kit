@@ -46,6 +46,18 @@ function Test-CommandExists {
 # relies on PATH concludes the tool is missing on a machine where it is present.
 # ---------------------------------------------------------------------------
 function Resolve-CodeGraphBinary {
+    if ($ProjectDir) {
+        $projectConfig = Join-Path $ProjectDir '.ctx-kit.json'
+        if (Test-Path $projectConfig) {
+            $relative = (Get-Content $projectConfig -Raw | ConvertFrom-Json).codeGraphBinary
+            if ($relative) {
+                $localBinary = Join-Path $ProjectDir $relative
+                if (-not (Test-Path $localBinary)) { Stop-WithError "project code-graph binary missing: $localBinary" }
+                return $localBinary
+            }
+        }
+    }
+    if ($env:CODE_GRAPH_BIN -and (Test-Path $env:CODE_GRAPH_BIN)) { return $env:CODE_GRAPH_BIN }
     $cacheFile = Join-Path $env:USERPROFILE '.cache\code-graph\binary-path'
     if (Test-Path $cacheFile) {
         $cached = (Get-Content $cacheFile -Raw).Trim()

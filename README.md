@@ -14,6 +14,65 @@
 
 ### Your session runs out of context long before it runs out of ideas.
 
+## Claude Code + Codex together (Windows)
+
+The PowerShell entrypoints now install both integrations without crossing their
+configuration files:
+
+```powershell
+.\install.ps1 -Target Both
+.\verify.ps1 -Target Both
+.\uninstall.ps1 -Target Both
+```
+
+Claude keeps `.claude/settings.local.json`; Codex receives a distinct
+`.codex/hooks.json` and project-local `.codex/config.toml` registrations for the same
+`context-mode` and `code-graph-mcp` toolchain. The agents share one
+`.code-graph/` index, while pre-existing hooks in either file remain untouched.
+`compressmcp` stays Claude-specific because it depends on Claude's response
+pipeline. Select one
+side with `-Target Claude` or `-Target Codex`.
+
+Codex must trust the project before loading its local config/hooks. Open the
+folder normally and accept the normal trust flow; `verify` warns if the CLI still
+selects a different transport. This installer does not bypass project trust.
+
+### Project binary and Godot verification (Windows)
+
+To use a fork's native executable, add `.ctx-kit.json` at the project root:
+
+```json
+{"codeGraphBinary":"tools/code-graph-mcp.exe"}
+```
+
+The explicit project binary takes priority over the shared cache. A missing
+configured binary fails rather than silently selecting another version. The
+installer pins it in project MCP configuration and index hooks. Claude's shared
+graph plugin is disabled only in this project while its own writer/server are
+used; uninstall restores previous plugin/binary settings and unrelated transports.
+These config files contain machine-specific paths and are gitignored.
+
+For a project containing `project.godot`, `verify.ps1` tests GDScript instead of
+a TypeScript surrogate. It creates its own temporary probe, invokes configured
+hooks with PATH reduced to Windows system directories, checks addition/callgraph
+and deletion, and calls the actual stdio MCP AST/search tools. It never edits game
+source or calls a script from the project's `tools/` folder. Use a GDScript-capable
+binary, such as the [vibegameengine fork](https://github.com/vibegameengine/code-graph-mcp);
+an old binary that cannot index `.gd` correctly fails this probe.
+
+Reproducible clean-project integration tests:
+
+```powershell
+node tests/clean-projects.mjs --binary C:/path/to/code-graph-mcp.exe --godot C:/path/to/godot.cmd
+```
+
+They initialize separate Git/Godot and TypeScript repos, test install/reinstall,
+actual configured hooks and MCP, and uninstall preservation. Installed machine
+toolchain/plugins are reused; this is not a test on a fresh Windows installation.
+The test asserts user-wide Claude/Codex config files remain byte-identical. No
+custom file-access denial hooks, mandatory graph-first agent policy or token-saving claims
+are installed by these changes.
+
 One build log eats half the window. Then the agent reads half the tree to answer what the
 call graph already knew. Three compactions later you are re-explaining the task instead of
 shipping it.
@@ -71,7 +130,7 @@ successes.
 | **context-mode** (plugin) | Runs commands in a sandbox and indexes big outputs into SQLite FTS5, so logs, snapshots and API payloads never enter the context window. |
 | **code-graph-mcp** (plugin) | Tree-sitter AST graph of the repo in SQLite. Answers "who calls X / what breaks if I change X" by reading the blast radius instead of the tree. |
 | **compressmcp** (npm) | Losslessly compresses MCP tool responses via key abbreviation before they hit the context. |
-| **project hooks** (this kit) | Keeps the graph fresh automatically — the part you otherwise wire by hand. |
+| **project hooks** (this kit) | Keeps the shared graph fresh automatically for Claude Code and Codex. |
 
 ## The reindexing problem this kit solves
 
@@ -297,10 +356,10 @@ The PowerShell scripts take the same options as native parameters:
 
 ```
 .\install.ps1       -ProjectDir DIR  -Throttle SEC  -SkipPlugins  -SkipCompressMcp
-                    -NoIndex  -Yes
+                    -NoIndex  -Target Both|Claude|Codex  -Yes
 .\install-model.ps1 -ProjectDir DIR  -ModelDir DIR  -NoEmbed
-.\verify.ps1        -ProjectDir DIR  -NoProbe
-.\uninstall.ps1     -ProjectDir DIR  -Global  -PurgeIndex  -Yes
+.\verify.ps1        -ProjectDir DIR  -Target Both|Claude|Codex  -NoProbe
+.\uninstall.ps1     -ProjectDir DIR  -Target Both|Claude|Codex  -Global  -PurgeIndex  -Yes
 ```
 
 ## Layout
